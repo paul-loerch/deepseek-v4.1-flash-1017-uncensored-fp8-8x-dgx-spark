@@ -1,0 +1,125 @@
+# recipe.lock.yaml -- every version and pin behind the published numbers. If you change one of these, re-measure.
+recipe:
+  name: dsv41-flash-1017-fp8-8x-dgx-spark
+  served_config: config/recipe.env                     # the only configuration: split experts at native width, 43.5 GiB KV pool, 128 sequences
+  measured_build: b072 (28 October 2026)               # build label of the published numbers
+
+model:
+  repo: deepseek-ai/DeepSeek-V4.1-Flash-1017
+  revision: 1bae0e1088993b9b82de08f59de5be5a34e42170
+  license: mit                      # from the model card; Copyright (c) 2023 DeepSeek
+  files: 63
+  bytes: 510310582318               # 475.3 GiB: 48 safetensors shards (FP8 e4m3 + MXFP4 experts) plus tokenizer, config and code files
+  served_name: dsv41-flash-1017-uncen
+
+overlay:                            # merged into a copy of the model by tools/build_overlay_variant.py
+  repo: drowzeys/keys-DeepSeek-V4.1-Flash-1017-Abliterated
+  revision: de412d2249632903dace23399526e00a145aada5
+  license: mit                      # gated: accept its terms on Hugging Face; no use the DeepSeek license prohibits
+  file: wo_b_l10_35_1017.safetensors
+  sha256: 88324ceaa2c0754a2bdb4ef6bb388a088438e352358343e6c2c882009cdde864
+  bytes: 1091589280
+  replaces: attn.wo_b weight and scale of layers 10-35 (26 weights + 26 scales, 52 tensors in 26 shards)
+  edit: rank-1 projection, mean relative Frobenius change 0.053
+  merged_checkpoint: 475 GiB, of which 179 GiB are the 26 patched shards; the rest are hardlinks to the official files
+
+image:
+  base: vllm/vllm-openai@sha256:27aa6d814d1fc44ff8f13bb50c291cb23f54e15544ace8b699e0b29bdcc9451b   # arm64 image of the nightly built from main e4a5b55 on 2026-10-25
+  vllm_commit: e4a5b5537344b103ed10de7764378ef09604ef3d
+  vllm_version: 0.32.1rc1.dev466+ge4a5b5537
+  torch: 2.14.0+cu130
+  cuda: "13.0"
+  flashinfer: 0.7.2.post1
+  nccl: 2.30.7
+  triton: 3.8.0
+  python: "3.12"
+  build: "image/Dockerfile + image/dsv41_bake.py (build-time edit: vLLM PR #60762, 64-token kernel blocks on SM12x, see image/IMAGE.md)"
+  tag: dsv41-flash-sm121:n1
+
+runtime_patches:                   # patches/NNN-*.sh, applied at container start in this order; each pins its target files by sha256
+  - "001"                          # IPC spin-wait grace (always applied)
+  - "012"                          # one-shot all-reduce for decode steps of up to 6 tokens (VLLM_GB10_ONESHOT_AR=1)
+  - "013"                          # DSpark draft top-k for DeepSeek-V4.1 (speculative config dspark_draft_topk)
+  - "014"                          # wo_a as one plain MXFP8 GEMM at TP 8
+  - "015"                          # replicated token embedding (installed; switched off by 045 in this configuration)
+  - "016"                          # Engram layers on node-local NVMe (engram config nvme)
+  - "018"                          # RoCE one-shot / two-shot collectives (VLLM_GB10_ROCE=1, VLLM_GB10_ROCE_TWOSHOT_MAX_BYTES)
+  - "019"                          # candidate-mask tiles past the row end skipped
+  - "020"                          # DSpark drafter: MXFP8 draft head, column-parallel main_proj
+  - "021"                          # MXFP8 W8A8 for prefill-sized GEMMs
+  - "022"                          # sequence-parallel mHC in prefill (VLLM_GB10_PREFILL_SP=1, Engram all-to-all)
+  - "023"                          # router GEMM through the CuTe dot-product kernel
+  - "024"                          # request top-p on the draft distribution
+  - "025"                          # fused-mHC split configs at 6 and 12 tokens
+  - "026"                          # masked verification (VLLM_GB10_MV=chain)
+  - "028"                          # two-half communication/compute overlap for the 022 region
+  - "029"                          # fused Markov bias for the drafter
+  - "030"                          # packed Engram rows (ENGRAM_NVME_PACKED_DIR, ENGRAM_NVME_PACKED=require)
+  - "031"                          # scheduler control file (inert here)
+  - "032"                          # allocator statistics (diagnostics only)
+  - "033"                          # expert slice padding 288 -> 320 (inert here)
+  - "034"                          # b12x compact micro launchers
+  - "036"                          # b12x native compact path at 288 columns (B12X_COMPACT_N32=1)
+  - "037"                          # b12x 64-row tiles for prefill-size launches
+  - "038"                          # drafter top-k candidate gather
+  - "040"                          # patch 026's confidence chain only where it is used
+  - "042"                          # allocator snapshot on demand (diagnostics only)
+  - "043"                          # decode sparse-indexer rows in chunks inside the CUDA graphs + one shared capture stream (VLLM_GB10_INDEXER_DECODE_CHUNK_MB=512, VLLM_GB10_SHARED_CAPTURE_STREAM=1)
+  - "045"                          # token embedding vocab-parallel again, i.e. patch 015 off (VLLM_GB10_EMBED_TP=1)
+patch_dir_tree_hash: 07d9f692cf4bc5e1   # the launcher's identity check over patches/ (names + contents, 84 files); must be equal on all nodes
+plugins: []
+
+serving:                           # what config/recipe.env sets
+  tensor_parallel: 8
+  nodes: 8
+  expert_parallel: false           # experts split over all eight GPUs; stored at their native 288-column width (b12x + patch 036)
+  moe_backend: b12x
+  linear_backend: marlin
+  max_model_len: 1048576
+  max_num_seqs: 128
+  max_num_batched_tokens: 8192
+  long_prefill_token_threshold: 4096
+  kv_cache_dtype: fp8
+  block_size: 64
+  kv_cache_memory_bytes: 46707769344   # 43.5 GiB per node = 20,411,335 tokens (needs patches 043 and 045; 40 GiB = 42949672960 without them)
+  indexer_kv_dtype: fp8
+  indexer_tp_shard_min_rows: 2048
+  engram: {cpu_offload: false, nvme: true, nvme_layers: [1, 14], nvme_verify_pct: 1, packed_rows: required, verify_after: true}
+  speculative: dspark, 5 draft tokens, draft top-k 2048, probabilistic drafting, block rejection sampling, adaptive verification off
+  cudagraph_mode: FULL_DECODE_ONLY   # 235 capture sizes up to 768 tokens (128 requests x 6); private graph pool 0.68 GiB per rank with patch 043 (3.79 GiB without)
+
+engram_packed:                     # built per node and rank by tools/engram_pack.py after the weights are in place
+  layers: [1, 14]
+  layout: 512-byte records [256 B fp8 values | 8 B e8m0 scales | 248 B zero], 4 KiB header, layout version 1
+  size_per_node: about 49 GB (22.89 GiB per layer)
+  validity: manifest records the source shard's size, mtime and header sha256; the engine refuses a mismatch (ENGRAM_NVME_PACKED=require)
+
+measured:                          # b072, 28 October 2026, GPU clock cap 2,200 MHz; measured with the tools in bench/
+  # the two sweeps are total generated tokens per second over the measured window, INCLUDING each request's prompt
+  # processing and first token: their 1-user values are end-to-end throughput, not one user's decode speed (next keys)
+  chat_users_total_tok_s: {1: 108.3, 2: 148.5, 4: 206.4, 8: 290.8, 16: 391.9, 32: 525.6, 64: 715.8, 96: 836.6, 128: 899.0}
+  coding_agents_total_tok_s: {1: 113.1, 4: 201.3, 8: 263.4, 16: 330.0}
+  one_user_coding_agent_decode_tok_s: 139.3   # decode phase only, mean of three runs' medians (32 recorded agent turns each); ~4.1 tokens per step
+  decode_step_ms: 28.6             # wall median of a one-user profile; GPU busy 27.9 ms (28.2-28.6 across b070-b072)
+  prefill_tok_s: {8k: 6695, 32k: 6901, 128k: 6778}
+  prompt_seconds: {512k: 81.4, 1M: 172.0}
+  kv_pool_tokens: 20411335
+  lowest_free_memory_gib: 8.08     # head node, worst-case order (1M prompt right after 128 users and 16 agents); other nodes 9.9-11.9
+  boot_seconds: 358
+  quality_vs_official: {kl_top5: 0.01796, gate: 0.0185, top1_agreement: 0.9548, gsm8k: 49/50, humaneval_plus: 19/20, tool_calls_ast: 19/24, needles: 12/12}
+
+hosts:                              # identical on all eight nodes when the numbers were measured
+  system: NVIDIA DGX Spark (GB10), 8 nodes
+  os: DGX OS 7.4.0 (OTA 7.6.0), Ubuntu 24.04.5 LTS
+  kernel: 7.0.0-1019-nvidia
+  nvidia_driver: 580.178.04
+  cuda_driver_api: "13.0"
+  docker: 29.6.2
+  connectx7_firmware: 28.45.4028
+  gpu_clock_cap_mhz: 2200          # nvidia-smi -lgc 0,2200 on every node
+
+fabric:
+  switch: MikroTik CRS812-8DS-2DQ-2DDQ
+  links: one 100G port per node, QSFP-DD to 4 x QSFP28 breakout AOCs, RS-FEC
+  mtu: 9000                         # switch ports l2mtu 9570; RoCE active_mtu 4096
+  transport: RoCE v2, NCCL over IB verbs, NCCL_MAX_NCHANNELS=4

@@ -1,0 +1,152 @@
+# readiness.txt -- what rank 0's log must (and must not) show before the server counts as ready.
+# Read by launch/up.sh --wait. One rule per line:   <require|fail|info> <extended regular expression, as for grep -E>
+#   require  every rule must match somewhere in the log once "Application startup complete" has appeared
+#   fail     a match at any moment during the boot aborts the wait, and the matching line is printed
+#   info     printed once when seen; known noise, never a failure
+# @API_PORT@ is replaced by API_PORT from cluster.env. Blank lines and lines starting with # are ignored.
+# Written for the shipped configuration (config/recipe.env, 29 patches): every patch that the configuration switches on must
+# report itself, the Engram rows must come from the packed files, and no failure line may appear. Patch 028's own self-test
+# runs at the first prefill of 2,048 tokens or more, not at boot, so only its preflight is required here (README,
+# quick start step 7).
+
+# -- the patched container started as intended
+require  \[recipe-entrypoint\] all patches applied
+fail     \[recipe-entrypoint\] FATAL
+
+# -- cache and engine
+require  GPU KV cache size: [0-9,]+ tokens
+
+# -- the API is up on the port from cluster.env
+require  Starting vLLM server on http://0\.0\.0\.0:@API_PORT@
+require  Application startup complete
+
+# -- anything below means the boot failed
+fail     invalid choice
+fail     Free memory on device .* less than desired GPU memory utilization
+fail     Engine core initialization failed
+fail     died unexpectedly
+fail     EngineDeadError
+fail     no kernel image
+fail     cudaFuncSetAttribute.*invalid argument
+fail     OutOfMemoryError
+fail     NV_ERR_NO_MEMORY
+fail     NCCL (WARN|error)
+fail     Too many open files
+fail     Failed to initialize FlashInfer Allreduce
+fail     No common block size
+fail     block_kv == 32 or block_kv == 64
+fail     requires a FlashInfer DSV4 sparse MLA decode specialization
+fail     page_block_size=[0-9]+ is unsupported
+fail     Traceback \(most recent call last\)
+
+# -- known noise during a healthy boot
+info     No available shared memory broadcast block found in 60 seconds
+info     SymmMemCommunicator: Device capability 12\.1 not supported
+info     Custom collectives are disabled
+info     Unknown vLLM environment variable detected
+
+# -- GB10 patches 001 + 012 must be active (patches/, VLLM_GB10_ONESHOT_AR=1 in config/recipe*.env)
+require  busy_loop_s = 0\.002
+require  \[patch-012\] one-shot all-reduce ACTIVE for group tp:0
+fail     \[patch-012\] one-shot all-reduce warm-up wrong
+
+# -- the GB10 patches (patches/NNN-*.sh) must be applied and, where they switch on at run time, report ACTIVE
+require  busy_loop_s = 0\.002
+require  \[patch-012\] one-shot all-reduce ACTIVE for group tp:0
+fail     \[patch-012\] one-shot all-reduce warm-up wrong
+require  \[OK\] \[013\] models/deepseek_v41/nvidia/dspark\.py (patched|already patched)
+require  Using .B12X_MXFP4
+require  \[OK\] \[014\] models/deepseek_v4/nvidia/ops/o_proj\.py (patched|already patched)
+require  \[OK\] \[015\] models/deepseek_v41/nvidia/model\.py (patched|already patched)
+require  \[OK\] \[016\] libengram_nvme\.so loads
+fail     \[016\] FATAL
+fail     \[030\] FATAL
+fail     \[engram-nvme\] FATAL
+require  \[engram-nvme\] reader started: backend=aio
+require  \[engram-nvme\] layer 1 rows .*layout=packed
+require  \[engram-nvme\] layer 14 rows .*layout=packed
+fail     layout=two-read
+
+# patch 018: RoCE one-shot / two-shot collectives (and they must never time out)
+require  \[OK\] \[018\] installed _gb10_roce\.py
+require  \[OK\] \[018\] installed _gb10_twoshot, proxy library
+require  \[patch-018\] RoCEnante ACTIVE for group tp:0
+require  \[patch-018\] two-shot all-reduce ACTIVE for group tp:0
+fail     \[FAIL\] \[018\]
+fail     \[patch-018\] RoCE (all-reduce|all-gather) warm-up wrong
+fail     \[patch-018\] two-shot all-reduce warm-up wrong
+fail     RoCE proxy failed
+fail     RoCE collective on rank [0-9]+ timed out
+fail     RoCE collectives must all be captured on one stream
+fail     GB10 two-shot (warm-up wrong|proxy failed|collective on rank)
+fail     failed to build the GB10 two-shot proxy
+fail     two-shot (proxy setup|all-reduce setup|queue-pair connect|all-reduce connect|proxy thread)
+
+# patches 019-025: mask skip, drafter, prefill W8A8, prefill sequence parallelism, router, draft top-p, mHC split
+require  \[OK\] \[019\] model_executor/kernels/attention/dsa/candidate_blocks\.py patched
+require  \[OK\] \[020\] models/deepseek_v41/nvidia/dspark\.py patched
+require  \[OK\] \[021\] model_executor/kernels/linear/__init__\.py patched
+require  \[patch-020\] DSpark main_proj column-parallel
+require  \[patch-020\] DSpark draft lm_head: MXFP8 copy
+require  \[patch-021\] MXFP8 prefill W8A8 ACTIVE
+require  \[OK\] \[022\] .*model\.py patched
+require  \[patch-022\] prefill sequence-parallel ACTIVE \(rank [0-9]/8
+require  \[patch-022 engram-a2a\] ACTIVE
+require  \[OK\] \[023\] model_executor/layers/fused_moe/router/gate_linear\.py patched
+require  \[OK\] \[024\] v1/worker/gpu/model_runner\.py patched
+require  \[OK\] \[024\] v1/worker/gpu/spec_decode/dspark/speculator\.py patched
+require  \[OK\] \[025\] .*tilelang_kernels\.py patched
+require  \[patch-025\] GB10 fused-mHC split configs
+fail     \[FAIL\] \[0(19|2[0-5])\]
+fail     \[patch-020\] .*(self-check failed|must be built before)
+fail     \[patch-022\] .*(FAILED|refus)
+fail     \[patch-022 engram-a2a\] .*(FAILED|falling back|fall back)
+
+# patch 026 (masked verification, chain policy) and 040 (chain only where it is used)
+require  \[OK\] \[026\] installed _mv\.py
+require  \[OK\] \[026\] model_executor/layers/fused_moe/router/fused_moe_router\.py patched
+require  \[OK\] \[026\] v1/worker/gpu/model_runner\.py patched
+require  \[patch-026 mv\] [0-9]+ target MoE routers remap
+require  \[patch-026 mv\] mode chain \(from VLLM_GB10_MV\): kind=4
+require  \[patch-026 mv\] ACTIVE: self-test passed on all 8 ranks
+require  \[OK\] \[040\] mv-skip edit in place
+fail     \[FAIL\] \[026\]
+fail     \[patch-026 mv\] self-test FAILED
+
+# patch 028 (two-half prefill overlap): applied, and its preflight passed on all ranks. Its self-test and the ACTIVE line come at the
+# first prefill of 2,048 tokens or more.
+require  \[OK\] \[028\] models/deepseek_v41/nvidia/model\.py patched
+require  \[OK\] \[028\] v1/worker/gpu/model_runner\.py patched
+require  \[patch-028\] preflight OK on all 8 ranks
+fail     \[patch-028\] .*(preflight failed|self-test FAILED|refus)
+
+# patches 029-038: fused Markov bias, packed Engram rows, scheduler control, allocator statistics, b12x MoE kernels, top-k gather
+require  \[OK\] \[029\] models/deepseek_v41/nvidia/dspark\.py patched
+require  \[OK\] \[030\] .*[0-9]+ manifest\(s\)
+require  \[OK\] \[031\] installed _sched_ctl\.py
+require  \[OK\] \[032\] installed _memstats\.py
+require  \[OK\] \[033\] b12x pad64 edit in place
+require  \[OK\] \[034\] b12x compact launcher edit in place
+require  \[patch-034\] b12x compact W4A8 micro launchers built \(n=288
+require  \[OK\] \[036\] b12x native compact n32 edit in place
+require  \[OK\] \[037\] b12x compact prefill tile edit in place
+require  \[OK\] \[038\] installed _dspark_topk_gather\.py
+require  \[patch-038\] DSpark top-k gather ACTIVE
+fail     \[patch-038\] .*(mismatch|DIFFERS|disabled|fallback)
+fail     \[0(29|3[0-8]|40|42)\] FATAL
+
+# patch 042: allocator snapshot on demand (diagnostics only)
+require  \[OK\] \[042\] memsnap edit in place
+
+# patch 043 (decode sparse-indexer rows in chunks inside the CUDA graphs, one shared capture stream) and patch 045 (token embedding
+# vocab-parallel again, which switches patch 015's replicated table off). The "decode indexer chunked" lines appear while the decode
+# graphs are captured, so they are part of every boot.
+require  \[OK\] \[043\] model_executor/layers/sparse_attn_indexer\.py patched
+require  \[OK\] \[043\] distributed/parallel_state\.py patched
+require  \[OK\] \[043\] graph-pool edits in place \(chunking 512, shared capture stream 1\)
+require  \[patch-043\] decode indexer chunked
+require  \[OK\] \[045\] models/deepseek_v41/nvidia/model\.py patched
+require  \[OK\] \[045\] embed-tp edit in place
+fail     \[FAIL\] \[04[35]\]
+# 043 falls back to the stock indexer path when its schedule cross-check fails; the 43.5 GiB KV pool does not fit then
+fail     \[patch-043\] stock path

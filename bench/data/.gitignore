@@ -1,0 +1,6 @@
+# The prepared datasets and the Hugging Face download cache are created on your machine by fetch_sources.py and
+# prep_*.py. Never commit them: they hold third-party text, and WildChat holds real user prompts.
+/prepared/
+/cache/
+*.jsonl
+*.parquet

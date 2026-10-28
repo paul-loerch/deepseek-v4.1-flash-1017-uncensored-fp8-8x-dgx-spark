@@ -1,0 +1,40 @@
+DeepSeek-V4.1-Flash-1017 on eight DGX Sparks -- recipe
+Licensed under the Apache License, Version 2.0 (see LICENSE).
+
+This repository contains no model weights, no container images and no datasets. It contains scripts, patches and
+documentation that build and run third-party software. Third-party material and its terms:
+
+Model: deepseek-ai/DeepSeek-V4.1-Flash-1017 at revision 1bae0e1088993b9b82de08f59de5be5a34e42170 (MIT License,
+  Copyright (c) 2023 DeepSeek, as in the LICENSE file of the model repository). Download it yourself and follow the terms
+  on its model card.
+
+Model overlay: drowzeys/keys-DeepSeek-V4.1-Flash-1017-Abliterated at revision de412d2249632903dace23399526e00a145aada5,
+  file wo_b_l10_35_1017.safetensors (sha256 88324ceaa2c0754a2bdb4ef6bb388a088438e352358343e6c2c882009cdde864). MIT License,
+  as stated on its model card. The repository is gated (automatic approval): you must accept its terms on Hugging Face
+  before you can download it. Its RESPONSIBLE_USE.md lists prohibited uses, and states that any use prohibited by the
+  upstream DeepSeek license is not allowed. The overlay replaces the attn.wo_b weights and scales of layers 10-35 of the
+  official checkpoint (26 weights and 26 scales; it removes the model's refusal behaviour). tools/build_overlay_variant.py
+  merges it into a copy of the checkpoint on your machine; this repository ships neither the overlay nor a merged
+  checkpoint.
+
+vLLM (https://github.com/vllm-project/vllm), Apache License 2.0, Copyright contributors to the vLLM project.
+  The runtime patches in patches/ modify vLLM source files inside the container at start-up and install modules into the vllm
+  package (among them one that runs on vLLM's NCCL wrapper, patches/files/gb10_oneshot_ar.py, and a native NVMe reader for the
+  Engram tables, patches/files/engram_nvme/). image/dsv41_bake.py carries the change of vLLM pull request #60762 (kernel block
+  sizes on SM12x) to two vLLM source files in the base image at build time.
+
+FlashInfer (https://github.com/flashinfer-ai/flashinfer), Apache License 2.0, and NVIDIA NCCL
+  (https://github.com/NVIDIA/nccl, source under the BSD 3-Clause License) are part of the vLLM image. This recipe does not
+  modify NCCL. It edits files of FlashInfer's experimental b12x package inside the container at start-up (patches 036 and 037;
+  the image on disk is not changed), and patches/files/gb10_twoshot.py, gb10_twoshot_cute.py and gb10_twoshot_proxy.c are derived
+  from FlashInfer's b12x RoCE runtime (roce_oneshot.py, _oneshot_cute.py and _roce_proxy.c, Apache License 2.0); patch 018 also calls that runtime
+  directly.
+
+vLLM container image (vllm/vllm-openai), used as the base image by digest. It includes NVIDIA CUDA components, among them
+  the NCCL binaries, that are distributed under NVIDIA's own license terms.
+
+Benchmark data, downloaded from Hugging Face by the bench/data/ scripts and not redistributed here (check each
+  dataset card for the current terms): allenai/WildChat-4.8M (ODC-BY; only user turns are used),
+  nebius/SWE-rebench-openhands-trajectories (CC-BY-4.0), zai-org/LongBench-v2 (Apache-2.0) and
+  princeton-nlp/SWE-bench_Lite_bm25_27K (see its dataset card). The tokenizer files the data scripts need for this
+  model come from deepseek-ai/DeepSeek-V4.1-Flash (MIT License, Copyright (c) 2023 DeepSeek).

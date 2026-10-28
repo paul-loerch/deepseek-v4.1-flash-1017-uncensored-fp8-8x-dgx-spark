@@ -1,0 +1,13 @@
+# Your cluster description (hostnames, addresses, paths) stays local. Copy cluster.env.example to cluster.env.
+cluster.env
+*.local.env
+# Run output
+logs/
+runs/
+bench/results/**/raw-local/
+# Python / editor / OS noise
+__pycache__/
+*.pyc
+.DS_Store
+._*
+*.swp
